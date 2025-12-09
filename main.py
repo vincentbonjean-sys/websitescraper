@@ -17,7 +17,7 @@ BRIGHTDATA_PASSWORD = os.environ.get('BRIGHTDATA_PASSWORD', '')
 BRIGHTDATA_HOST = os.environ.get('BRIGHTDATA_HOST', 'brd.superproxy.io')
 BRIGHTDATA_PORT = os.environ.get('BRIGHTDATA_PORT', '33335')
 
-# Method 3: Browserless.io - For JS-heavy sites (optional)
+# Method 3: Browserless.io - For JS-heavy sites
 BROWSERLESS_API_KEY = os.environ.get('BROWSERLESS_API_KEY', '')
 
 USER_AGENTS = [
@@ -25,7 +25,7 @@ USER_AGENTS = [
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 ]
 
-# Sites that REQUIRE JavaScript rendering (SPAs) - Web Unlocker won't work
+# Sites that REQUIRE JavaScript rendering - MUST use Browserless
 JS_REQUIRED_DOMAINS = [
     'myworkdayjobs.com',
     'workday.com',
@@ -48,9 +48,10 @@ JS_REQUIRED_DOMAINS = [
     'personio.com',
     'bamboohr.com',
     'recruitee.com',
+    'workable.com',
 ]
 
-# Sites with anti-bot that Web Unlocker CAN handle
+# Sites with anti-bot that Web Unlocker CAN handle (server-rendered)
 UNLOCKER_DOMAINS = [
     'swooped.co',
     'linkedin.com',
@@ -68,59 +69,22 @@ def get_domain(url):
     return urlparse(url).netloc.lower()
 
 
-def needs_js_render(url):
-    """Check if URL requires JavaScript rendering"""
+def check_js_required(url):
+    """Check if URL requires JavaScript rendering - returns domain if matched"""
     domain = get_domain(url)
-    return any(d in domain for d in JS_REQUIRED_DOMAINS)
+    for js_domain in JS_REQUIRED_DOMAINS:
+        if js_domain in domain:
+            return js_domain
+    return None
 
 
-def needs_unlocker(url):
-    """Check if URL needs anti-bot bypass"""
+def check_unlocker_required(url):
+    """Check if URL needs Web Unlocker"""
     domain = get_domain(url)
-    return any(d in domain for d in UNLOCKER_DOMAINS)
-
-
-def is_shell_only(text):
-    """Detect if we only got page shell without actual content"""
-    if not text:
-        return True
-    
-    lower_text = text.lower()
-    
-    # Common shell indicators (navigation, footer, no real content)
-    shell_indicators = [
-        'toggle navigation',
-        'find jobs',
-        'candidate dashboard',
-        'sign up and add your profile',
-        'join today',
-        'terms of use',
-        'privacy policy',
-        'equal opportunity employer',
-    ]
-    
-    # Job content indicators
-    content_indicators = [
-        'responsibilities',
-        'requirements',
-        'qualifications',
-        'experience',
-        'job description',
-        'what you\'ll do',
-        'about the role',
-        'about this job',
-        'key accountabilities',
-        'duties',
-    ]
-    
-    shell_count = sum(1 for ind in shell_indicators if ind in lower_text)
-    content_count = sum(1 for ind in content_indicators if ind in lower_text)
-    
-    # If lots of shell indicators but few content indicators = shell only
-    if shell_count >= 3 and content_count < 2:
-        return True
-    
-    return False
+    for d in UNLOCKER_DOMAINS:
+        if d in domain:
+            return d
+    return None
 
 
 def is_garbage_text(text):
@@ -136,20 +100,48 @@ def is_garbage_text(text):
     if len(words) < 10:
         return True
     
+    return False
+
+
+def is_shell_only(text):
+    """Detect if we only got page shell without actual job content"""
+    if not text:
+        return True
+    
     lower_text = text.lower()
-    empty_indicators = [
-        'please enable javascript',
-        'javascript is required',
-        'browser does not support',
-        'loading...',
-        'please wait while',
-        'redirecting...',
-        'just a moment',
-        'checking your browser',
+    
+    shell_indicators = [
+        'toggle navigation',
+        'candidate dashboard',
+        'sign up and add your profile',
+        'join today',
+        'terms of use',
+        'privacy policy',
+        'cookie policy',
+        'career areas',
+        'featured awards',
     ]
-    if any(indicator in lower_text for indicator in empty_indicators):
-        if len(text) < 500:
-            return True
+    
+    content_indicators = [
+        'responsibilities',
+        'requirements',
+        'qualifications',
+        'experience required',
+        'what you\'ll do',
+        'about the role',
+        'key accountabilities',
+        'primary accountabilities',
+        'job duties',
+        'position summary',
+        'basic qualifications',
+        'preferred qualifications',
+    ]
+    
+    shell_count = sum(1 for ind in shell_indicators if ind in lower_text)
+    content_count = sum(1 for ind in content_indicators if ind in lower_text)
+    
+    if shell_count >= 2 and content_count < 1:
+        return True
     
     return False
 
@@ -256,15 +248,19 @@ def scrape_with_proxy(url):
 def scrape_with_browserless(url):
     """Scrape using Browserless.io (renders JavaScript)"""
     if not BROWSERLESS_API_KEY:
-        raise ValueError("Browserless API key not configured")
+        raise ValueError("BROWSERLESS_API_KEY not configured")
     
     response = requests.post(
         f"https://chrome.browserless.io/content?token={BROWSERLESS_API_KEY}",
         json={
             "url": url,
-            "waitFor": 3000,  # Wait 3 seconds for JS to load
+            "waitFor": 5000,  # Wait 5 seconds for JS to load
         },
-        timeout=60
+        timeout=90,
+        headers={
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-cache'
+        }
     )
     response.raise_for_status()
     
@@ -277,8 +273,10 @@ def scrape(url, force_browserless=False):
         url = 'https://' + url
     
     domain = get_domain(url)
-    requires_js = needs_js_render(url)
-    requires_unlocker = needs_unlocker(url)
+    
+    # Check what type of site this is
+    js_match = check_js_required(url)
+    unlocker_match = check_unlocker_required(url)
     
     api_configured = bool(BRIGHTDATA_API_KEY and BRIGHTDATA_ZONE)
     proxy_configured = bool(BRIGHTDATA_USERNAME and BRIGHTDATA_PASSWORD)
@@ -286,98 +284,111 @@ def scrape(url, force_browserless=False):
     
     errors = []
     
-    # Route 1: JS-required sites → Need Browserless
-    if requires_js or force_browserless:
-        if browserless_configured:
-            try:
-                text = scrape_with_browserless(url)
-                if not is_garbage_text(text) and not is_shell_only(text):
-                    return text, "browserless"
-                errors.append("Browserless returned incomplete content")
-            except Exception as e:
-                errors.append(f"Browserless error: {str(e)}")
-        
+    # ============================================
+    # ROUTE 1: JS-REQUIRED SITES → BROWSERLESS ONLY
+    # These sites WILL NOT work with Web Unlocker
+    # ============================================
+    if js_match or force_browserless:
         if not browserless_configured:
-            raise ValueError(f"ERROR_JS_REQUIRED: Site {domain} requires JavaScript rendering. Configure BROWSERLESS_API_KEY or use a browser-based solution.")
+            return None, None, f"ERROR_JS_REQUIRED: Site '{js_match or domain}' requires JavaScript rendering. Add BROWSERLESS_API_KEY to scrape this site."
         
-        if errors:
-            raise ValueError(f"Could not scrape JS site {domain}: {'; '.join(errors)}")
+        try:
+            text = scrape_with_browserless(url)
+            if not is_garbage_text(text) and not is_shell_only(text):
+                return text, "browserless", None
+            errors.append("Browserless returned incomplete content")
+        except Exception as e:
+            errors.append(f"Browserless error: {str(e)}")
+        
+        return None, None, f"Could not scrape JS site {domain}: {'; '.join(errors)}"
     
-    # Route 2: Anti-bot sites → Web Unlocker
-    if requires_unlocker:
+    # ============================================
+    # ROUTE 2: ANTI-BOT SITES → WEB UNLOCKER
+    # These sites work with Web Unlocker (server-rendered)
+    # ============================================
+    if unlocker_match:
+        # Try API method first
         if api_configured:
             try:
                 text = scrape_with_api(url)
                 if not is_garbage_text(text) and not is_shell_only(text):
-                    return text, "api"
+                    return text, "api", None
                 errors.append("API returned incomplete content")
             except Exception as e:
                 errors.append(f"API error: {str(e)}")
         
+        # Try proxy method
         if proxy_configured:
             try:
                 text = scrape_with_proxy(url)
                 if not is_garbage_text(text) and not is_shell_only(text):
-                    return text, "proxy"
+                    return text, "proxy", None
                 errors.append("Proxy returned incomplete content")
             except Exception as e:
                 errors.append(f"Proxy error: {str(e)}")
         
-        if errors:
-            raise ValueError(f"Could not scrape {domain}: {'; '.join(errors)}")
-        else:
-            raise ValueError(f"No credentials configured for anti-bot site {domain}")
+        # Last resort: Browserless
+        if browserless_configured:
+            try:
+                text = scrape_with_browserless(url)
+                if not is_garbage_text(text) and not is_shell_only(text):
+                    return text, "browserless", None
+            except Exception as e:
+                errors.append(f"Browserless error: {str(e)}")
+        
+        return None, None, f"Could not scrape {domain}: {'; '.join(errors)}"
     
-    # Route 3: Normal sites → Direct first
+    # ============================================
+    # ROUTE 3: NORMAL SITES → TRY DIRECT FIRST
+    # ============================================
     try:
         text = scrape_direct(url)
         if not is_garbage_text(text) and not is_shell_only(text) and len(text) >= 100:
-            return text, "direct"
+            return text, "direct", None
         errors.append("Direct returned incomplete content")
     except Exception as e:
         errors.append(f"Direct error: {str(e)}")
     
-    # Route 4: Direct failed → Try Web Unlocker API
+    # Direct failed → Try Web Unlocker API
     if api_configured:
         try:
             text = scrape_with_api(url)
             if not is_garbage_text(text) and not is_shell_only(text):
-                return text, "api"
-            errors.append("API returned incomplete content")
+                return text, "api", None
         except Exception as e:
             errors.append(f"API error: {str(e)}")
     
-    # Route 5: Try proxy
+    # Try proxy
     if proxy_configured:
         try:
             text = scrape_with_proxy(url)
             if not is_garbage_text(text) and not is_shell_only(text):
-                return text, "proxy"
-            errors.append("Proxy returned incomplete content")
+                return text, "proxy", None
         except Exception as e:
             errors.append(f"Proxy error: {str(e)}")
     
-    # Route 6: Last resort → Browserless
+    # Last resort: Browserless
     if browserless_configured:
         try:
             text = scrape_with_browserless(url)
             if not is_garbage_text(text) and not is_shell_only(text):
-                return text, "browserless"
+                return text, "browserless", None
         except Exception as e:
             errors.append(f"Browserless error: {str(e)}")
     
-    raise ValueError(f"Could not scrape {domain}: {'; '.join(errors)}")
+    return None, None, f"Could not scrape {domain}: {'; '.join(errors)}"
 
 
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
         "status": "running",
-        "version": "4.0-with-browserless",
+        "version": "4.1-fixed-routing",
         "api_configured": bool(BRIGHTDATA_API_KEY and BRIGHTDATA_ZONE),
         "proxy_configured": bool(BRIGHTDATA_USERNAME and BRIGHTDATA_PASSWORD),
         "browserless_configured": bool(BROWSERLESS_API_KEY),
-        "js_required_domains": len(JS_REQUIRED_DOMAINS)
+        "js_required_domains": JS_REQUIRED_DOMAINS,
+        "unlocker_domains": UNLOCKER_DOMAINS
     })
 
 
@@ -392,13 +403,25 @@ def handle():
         if not url:
             return jsonify({"success": False, "error": "website parameter required"}), 400
         
-        text, method = scrape(url, force_browserless=force_browserless)
+        text, method, error = scrape(url, force_browserless=force_browserless)
         
-        if len(text) < 100:
+        if error:
+            error_code = "ERROR_SCRAPING_FAILED"
+            if "ERROR_JS_REQUIRED" in error:
+                error_code = "ERROR_JS_REQUIRED"
+            
+            return jsonify({
+                "success": False,
+                "error": error_code,
+                "message": error,
+                "url": url
+            }), 422
+        
+        if not text or len(text) < 100:
             return jsonify({
                 "success": False,
                 "error": "ERROR_MINIMAL_CONTENT",
-                "text_length": len(text),
+                "text_length": len(text) if text else 0,
                 "url": url
             }), 422
         
@@ -409,34 +432,6 @@ def handle():
             "url": url,
             "method": method
         })
-    
-    except ValueError as e:
-        error_msg = str(e)
-        error_code = "ERROR_SCRAPING_FAILED"
-        
-        if "ERROR_JS_REQUIRED" in error_msg:
-            error_code = "ERROR_JS_REQUIRED"
-        
-        return jsonify({
-            "success": False,
-            "error": error_code,
-            "message": error_msg,
-            "url": data.get("website") or data.get("url")
-        }), 422
-    
-    except requests.exceptions.HTTPError as e:
-        status = e.response.status_code if e.response is not None else 0
-        error_body = ""
-        try:
-            error_body = e.response.text[:500] if e.response else ""
-        except:
-            pass
-        return jsonify({
-            "success": False,
-            "error": f"ERROR_HTTP_{status}",
-            "details": error_body,
-            "url": data.get("website") or data.get("url")
-        }), 422
     
     except requests.exceptions.Timeout:
         return jsonify({
