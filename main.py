@@ -70,7 +70,7 @@ def get_domain(url):
 
 
 def check_js_required(url):
-    """Check if URL requires JavaScript rendering - returns domain if matched"""
+    """Check if URL requires JavaScript rendering"""
     domain = get_domain(url)
     for js_domain in JS_REQUIRED_DOMAINS:
         if js_domain in domain:
@@ -250,16 +250,19 @@ def scrape_with_browserless(url):
     if not BROWSERLESS_API_KEY:
         raise ValueError("BROWSERLESS_API_KEY not configured")
     
+    # Browserless /content API - correct format
     response = requests.post(
         f"https://chrome.browserless.io/content?token={BROWSERLESS_API_KEY}",
         json={
             "url": url,
-            "waitFor": 5000,  # Wait 5 seconds for JS to load
+            "gotoOptions": {
+                "waitUntil": "networkidle2",
+                "timeout": 30000
+            }
         },
         timeout=90,
         headers={
-            'Content-Type': 'application/json',
-            'Cache-Control': 'no-cache'
+            'Content-Type': 'application/json'
         }
     )
     response.raise_for_status()
@@ -286,7 +289,6 @@ def scrape(url, force_browserless=False):
     
     # ============================================
     # ROUTE 1: JS-REQUIRED SITES → BROWSERLESS ONLY
-    # These sites WILL NOT work with Web Unlocker
     # ============================================
     if js_match or force_browserless:
         if not browserless_configured:
@@ -304,10 +306,8 @@ def scrape(url, force_browserless=False):
     
     # ============================================
     # ROUTE 2: ANTI-BOT SITES → WEB UNLOCKER
-    # These sites work with Web Unlocker (server-rendered)
     # ============================================
     if unlocker_match:
-        # Try API method first
         if api_configured:
             try:
                 text = scrape_with_api(url)
@@ -317,7 +317,6 @@ def scrape(url, force_browserless=False):
             except Exception as e:
                 errors.append(f"API error: {str(e)}")
         
-        # Try proxy method
         if proxy_configured:
             try:
                 text = scrape_with_proxy(url)
@@ -327,7 +326,6 @@ def scrape(url, force_browserless=False):
             except Exception as e:
                 errors.append(f"Proxy error: {str(e)}")
         
-        # Last resort: Browserless
         if browserless_configured:
             try:
                 text = scrape_with_browserless(url)
@@ -349,7 +347,6 @@ def scrape(url, force_browserless=False):
     except Exception as e:
         errors.append(f"Direct error: {str(e)}")
     
-    # Direct failed → Try Web Unlocker API
     if api_configured:
         try:
             text = scrape_with_api(url)
@@ -358,7 +355,6 @@ def scrape(url, force_browserless=False):
         except Exception as e:
             errors.append(f"API error: {str(e)}")
     
-    # Try proxy
     if proxy_configured:
         try:
             text = scrape_with_proxy(url)
@@ -367,7 +363,6 @@ def scrape(url, force_browserless=False):
         except Exception as e:
             errors.append(f"Proxy error: {str(e)}")
     
-    # Last resort: Browserless
     if browserless_configured:
         try:
             text = scrape_with_browserless(url)
@@ -383,12 +378,10 @@ def scrape(url, force_browserless=False):
 def home():
     return jsonify({
         "status": "running",
-        "version": "4.1-fixed-routing",
+        "version": "4.2-fixed-browserless",
         "api_configured": bool(BRIGHTDATA_API_KEY and BRIGHTDATA_ZONE),
         "proxy_configured": bool(BRIGHTDATA_USERNAME and BRIGHTDATA_PASSWORD),
         "browserless_configured": bool(BROWSERLESS_API_KEY),
-        "js_required_domains": JS_REQUIRED_DOMAINS,
-        "unlocker_domains": UNLOCKER_DOMAINS
     })
 
 
