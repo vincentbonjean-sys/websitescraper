@@ -1,9 +1,3 @@
-"""
-Hybrid Scraper - Uses ScraperAPI for JavaScript sites
-ScraperAPI: https://www.scraperapi.com (5000 free requests/month)
-
-Set environment variable: SCRAPER_API_KEY=your_key
-"""
 import os
 import re
 import random
@@ -13,14 +7,14 @@ from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 
-SCRAPER_API_KEY = os.environ.get('SCRAPER_API_KEY', '')
+# Bright Data API key (set in Cloud Run environment variables)
+BRIGHTDATA_API_KEY = os.environ.get('BRIGHTDATA_API_KEY', '')
 
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 ]
 
-# Sites known to require JavaScript
 JS_REQUIRED_DOMAINS = [
     'swooped.co',
     'lever.co',
@@ -38,7 +32,6 @@ JS_REQUIRED_DOMAINS = [
 
 
 def needs_javascript(url):
-    """Check if URL is from a known JS-required domain"""
     from urllib.parse import urlparse
     domain = urlparse(url).netloc.lower()
     return any(js_domain in domain for js_domain in JS_REQUIRED_DOMAINS)
@@ -90,15 +83,27 @@ def scrape_direct(url):
     return extract_text_from_html(response.text)
 
 
-def scrape_with_api(url):
-    """Scrape using ScraperAPI (handles JavaScript)"""
-    if not SCRAPER_API_KEY:
-        raise ValueError("SCRAPER_API_KEY not configured")
+def scrape_with_brightdata(url):
+    """Scrape using Bright Data Web Scraper API"""
+    if not BRIGHTDATA_API_KEY:
+        raise ValueError("BRIGHTDATA_API_KEY not configured")
     
-    api_url = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url}&render=true"
-    response = requests.get(api_url, timeout=60)
+    api_url = "https://api.brightdata.com/request"
+    
+    headers = {
+        'Authorization': f'Bearer {BRIGHTDATA_API_KEY}',
+        'Content-Type': 'application/json'
+    }
+    
+    payload = {
+        'url': url,
+        'format': 'raw'  # Get raw HTML
+    }
+    
+    response = requests.post(api_url, headers=headers, json=payload, timeout=60)
     response.raise_for_status()
     
+    # Bright Data returns the HTML content
     return extract_text_from_html(response.text)
 
 
@@ -106,7 +111,7 @@ def scrape(url, force_js=False):
     if not url.startswith(('http://', 'https://')):
         url = 'https://' + url
     
-    # Try direct first unless we know it needs JS
+    # Try direct scraping first unless we know it needs JS
     if not force_js and not needs_javascript(url):
         try:
             text = scrape_direct(url)
@@ -115,22 +120,22 @@ def scrape(url, force_js=False):
         except:
             pass
     
-    # Fall back to ScraperAPI for JS rendering
-    if SCRAPER_API_KEY:
-        text = scrape_with_api(url)
+    # Fall back to Bright Data for JS rendering
+    if BRIGHTDATA_API_KEY:
+        text = scrape_with_brightdata(url)
         if not is_garbage_text(text):
-            return text, "scraperapi"
-        raise ValueError("ScraperAPI returned unreadable content")
+            return text, "brightdata"
+        raise ValueError("Bright Data returned unreadable content")
     else:
-        raise ValueError("Site requires JavaScript - configure SCRAPER_API_KEY")
+        raise ValueError("Site requires JavaScript - configure BRIGHTDATA_API_KEY")
 
 
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
         "status": "running",
-        "version": "3.0-hybrid",
-        "scraperapi_configured": bool(SCRAPER_API_KEY)
+        "version": "3.0-brightdata",
+        "brightdata_configured": bool(BRIGHTDATA_API_KEY)
     })
 
 
