@@ -1,3 +1,9 @@
+"""
+Hybrid Scraper - Uses ScraperAPI for JavaScript sites
+ScraperAPI: https://www.scraperapi.com (5000 free requests/month)
+
+Set environment variable: SCRAPER_API_KEY=your_key
+"""
 import os
 import re
 import random
@@ -7,134 +13,177 @@ from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 
-# Multiple user agents to rotate
+SCRAPER_API_KEY = os.environ.get('SCRAPER_API_KEY', '')
+
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 ]
 
-def get_headers(url):
-    """Generate browser-like headers"""
+# Sites known to require JavaScript
+JS_REQUIRED_DOMAINS = [
+    'swooped.co',
+    'lever.co',
+    'jobs.lever.co',
+    'greenhouse.io',
+    'boards.greenhouse.io',
+    'linkedin.com',
+    'indeed.com',
+    'glassdoor.com',
+    'ziprecruiter.com',
+    'monster.com',
+    'angel.co',
+    'wellfound.com',
+]
+
+
+def needs_javascript(url):
+    """Check if URL is from a known JS-required domain"""
     from urllib.parse import urlparse
-    domain = urlparse(url).netloc
-    
-    return {
-        'User-Agent': random.choice(USER_AGENTS),
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
-        'Cache-Control': 'max-age=0',
-        'Host': domain,
-        'Referer': f'https://www.google.com/search?q={domain}',
-    }
+    domain = urlparse(url).netloc.lower()
+    return any(js_domain in domain for js_domain in JS_REQUIRED_DOMAINS)
+
+
+def is_garbage_text(text):
+    if not text or len(text) < 50:
+        return True
+    control_chars = sum(1 for c in text if ord(c) < 32 and c not in '\n\r\t')
+    null_chars = text.count('\x00')
+    if null_chars > 0 or (len(text) > 0 and control_chars / len(text) > 0.05):
+        return True
+    words = re.findall(r'[a-zA-Z]{3,}', text)
+    return len(words) < 10
+
 
 def clean_text(text):
     if not text:
         return ""
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)
     text = re.sub(r'[\U00010000-\U0010ffff]', '', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = re.sub(r'[ \t]+', ' ', text)
     return text.strip()
 
-def scrape(url, retries=2):
+
+def extract_text_from_html(html):
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in ['script', 'style', 'nav', 'footer', 'header', 'noscript', 'iframe', 'svg']:
+        for el in soup.find_all(tag):
+            el.decompose()
+    main = soup.find("main") or soup.find("article") or soup.find("body") or soup
+    return clean_text(main.get_text(separator='\n', strip=True))
+
+
+def scrape_direct(url):
+    """Direct scraping without JavaScript rendering"""
+    headers = {
+        'User-Agent': random.choice(USER_AGENTS),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+    }
+    response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+    response.raise_for_status()
+    
+    if response.encoding is None or response.encoding == 'ISO-8859-1':
+        response.encoding = response.apparent_encoding or 'utf-8'
+    
+    return extract_text_from_html(response.text)
+
+
+def scrape_with_api(url):
+    """Scrape using ScraperAPI (handles JavaScript)"""
+    if not SCRAPER_API_KEY:
+        raise ValueError("SCRAPER_API_KEY not configured")
+    
+    api_url = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={url}&render=true"
+    response = requests.get(api_url, timeout=60)
+    response.raise_for_status()
+    
+    return extract_text_from_html(response.text)
+
+
+def scrape(url, force_js=False):
     if not url.startswith(('http://', 'https://')):
         url = 'https://' + url
     
-    last_error = None
-    
-    for attempt in range(retries + 1):
+    # Try direct first unless we know it needs JS
+    if not force_js and not needs_javascript(url):
         try:
-            headers = get_headers(url)
-            
-            # Create session for cookie handling
-            session = requests.Session()
-            
-            response = session.get(
-                url, 
-                headers=headers, 
-                timeout=20, 
-                allow_redirects=True,
-                verify=True
-            )
-            response.raise_for_status()
-            
-            if response.encoding is None or response.encoding == 'ISO-8859-1':
-                response.encoding = response.apparent_encoding or 'utf-8'
-            
-            soup = BeautifulSoup(response.text, "html.parser")
-            
-            for tag in ['script', 'style', 'nav', 'footer', 'header', 'noscript', 'iframe', 'svg']:
-                for el in soup.find_all(tag):
-                    el.decompose()
-            
-            main = soup.find("main") or soup.find("article") or soup.find("body") or soup
-            return clean_text(main.get_text(separator='\n', strip=True))
-            
-        except requests.exceptions.HTTPError as e:
-            last_error = e
-            if e.response.status_code == 403 and attempt < retries:
-                # Retry with different user agent
-                continue
-            raise
-        except Exception as e:
-            last_error = e
-            if attempt < retries:
-                continue
-            raise
+            text = scrape_direct(url)
+            if not is_garbage_text(text) and len(text) >= 100:
+                return text, "direct"
+        except:
+            pass
+    
+    # Fall back to ScraperAPI for JS rendering
+    if SCRAPER_API_KEY:
+        text = scrape_with_api(url)
+        if not is_garbage_text(text):
+            return text, "scraperapi"
+        raise ValueError("ScraperAPI returned unreadable content")
+    else:
+        raise ValueError("Site requires JavaScript - configure SCRAPER_API_KEY")
+
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "running", "version": "2.0"})
+    return jsonify({
+        "status": "running",
+        "version": "3.0-hybrid",
+        "scraperapi_configured": bool(SCRAPER_API_KEY)
+    })
+
 
 @app.route("/", methods=["POST"])
 def handle():
     try:
         data = request.get_json() or {}
         url = data.get("website") or data.get("url")
+        force_js = data.get("force_js", False)
         
         if not url:
             return jsonify({"success": False, "error": "website parameter required"}), 400
         
-        text = scrape(url)
+        text, method = scrape(url, force_js=force_js)
         
-        if len(text) < 50:
+        if len(text) < 100:
             return jsonify({
-                "success": False, 
-                "error": "Minimal content extracted - site may require JavaScript",
-                "text": text,
+                "success": False,
+                "error": "ERROR_MINIMAL_CONTENT",
                 "url": url
             }), 422
         
         return jsonify({
-            "success": True, 
-            "text": text, 
+            "success": True,
+            "text": text,
             "text_length": len(text),
-            "url": url
+            "url": url,
+            "method": method
         })
+    
+    except ValueError as e:
+        return jsonify({
+            "success": False,
+            "error": "ERROR_JAVASCRIPT_REQUIRED",
+            "message": str(e),
+            "url": data.get("website") or data.get("url")
+        }), 422
     
     except requests.exceptions.HTTPError as e:
         status = e.response.status_code if e.response is not None else 0
         return jsonify({
-            "success": False, 
-            "error": f"HTTP {status}: Site blocked the request or page not found",
-            "url": data.get("website") or data.get("url"),
-            "blocked": status == 403
+            "success": False,
+            "error": f"ERROR_HTTP_{status}",
+            "url": data.get("website") or data.get("url")
         }), 422
     
-    except requests.exceptions.RequestException as e:
-        return jsonify({"success": False, "error": str(e)}), 422
-    
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({
+            "success": False,
+            "error": "ERROR_UNKNOWN",
+            "message": str(e)
+        }), 500
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
