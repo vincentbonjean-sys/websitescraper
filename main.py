@@ -7,28 +7,31 @@ from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 
-# Method 1: Bright Data Web Unlocker - API method (was working for swooped.co)
+# Method 1: Bright Data Web Unlocker - API method
 BRIGHTDATA_API_KEY = os.environ.get('BRIGHTDATA_API_KEY', '')
-BRIGHTDATA_ZONE = os.environ.get('BRIGHTDATA_ZONE', '')  # e.g., "web_unlocker1"
+BRIGHTDATA_ZONE = os.environ.get('BRIGHTDATA_ZONE', '')
 
-# Method 2: Bright Data Web Unlocker - Proxy method (additional coverage)
+# Method 2: Bright Data Web Unlocker - Proxy method
 BRIGHTDATA_USERNAME = os.environ.get('BRIGHTDATA_USERNAME', '')
 BRIGHTDATA_PASSWORD = os.environ.get('BRIGHTDATA_PASSWORD', '')
 BRIGHTDATA_HOST = os.environ.get('BRIGHTDATA_HOST', 'brd.superproxy.io')
 BRIGHTDATA_PORT = os.environ.get('BRIGHTDATA_PORT', '33335')
+
+# Method 3: Browserless.io - For JS-heavy sites (optional)
+BROWSERLESS_API_KEY = os.environ.get('BROWSERLESS_API_KEY', '')
 
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
 ]
 
-# Domains that need Bright Data (anti-bot or JS-heavy)
-BRIGHTDATA_DOMAINS = [
-    # JS-heavy SPAs
+# Sites that REQUIRE JavaScript rendering (SPAs) - Web Unlocker won't work
+JS_REQUIRED_DOMAINS = [
     'myworkdayjobs.com',
     'workday.com',
     'icims.com',
     'hiringtoday.com',
+    'pepsicojobs.com',
     'lever.co',
     'jobs.lever.co',
     'greenhouse.io',
@@ -45,7 +48,10 @@ BRIGHTDATA_DOMAINS = [
     'personio.com',
     'bamboohr.com',
     'recruitee.com',
-    # Anti-bot sites
+]
+
+# Sites with anti-bot that Web Unlocker CAN handle
+UNLOCKER_DOMAINS = [
     'swooped.co',
     'linkedin.com',
     'indeed.com',
@@ -62,9 +68,59 @@ def get_domain(url):
     return urlparse(url).netloc.lower()
 
 
-def needs_brightdata(url):
+def needs_js_render(url):
+    """Check if URL requires JavaScript rendering"""
     domain = get_domain(url)
-    return any(d in domain for d in BRIGHTDATA_DOMAINS)
+    return any(d in domain for d in JS_REQUIRED_DOMAINS)
+
+
+def needs_unlocker(url):
+    """Check if URL needs anti-bot bypass"""
+    domain = get_domain(url)
+    return any(d in domain for d in UNLOCKER_DOMAINS)
+
+
+def is_shell_only(text):
+    """Detect if we only got page shell without actual content"""
+    if not text:
+        return True
+    
+    lower_text = text.lower()
+    
+    # Common shell indicators (navigation, footer, no real content)
+    shell_indicators = [
+        'toggle navigation',
+        'find jobs',
+        'candidate dashboard',
+        'sign up and add your profile',
+        'join today',
+        'terms of use',
+        'privacy policy',
+        'equal opportunity employer',
+    ]
+    
+    # Job content indicators
+    content_indicators = [
+        'responsibilities',
+        'requirements',
+        'qualifications',
+        'experience',
+        'job description',
+        'what you\'ll do',
+        'about the role',
+        'about this job',
+        'key accountabilities',
+        'duties',
+    ]
+    
+    shell_count = sum(1 for ind in shell_indicators if ind in lower_text)
+    content_count = sum(1 for ind in content_indicators if ind in lower_text)
+    
+    # If lots of shell indicators but few content indicators = shell only
+    if shell_count >= 3 and content_count < 2:
+        return True
+    
+    return False
 
 
 def is_garbage_text(text):
@@ -138,7 +194,7 @@ def scrape_direct(url):
 
 
 def scrape_with_api(url):
-    """Scrape using Bright Data Web Unlocker API method"""
+    """Scrape using Bright Data Web Unlocker API"""
     if not BRIGHTDATA_API_KEY or not BRIGHTDATA_ZONE:
         raise ValueError("API credentials not configured")
     
@@ -165,7 +221,7 @@ def scrape_with_api(url):
 
 
 def scrape_with_proxy(url):
-    """Scrape using Bright Data Web Unlocker proxy method"""
+    """Scrape using Bright Data Web Unlocker proxy"""
     if not BRIGHTDATA_USERNAME or not BRIGHTDATA_PASSWORD:
         raise ValueError("Proxy credentials not configured")
     
@@ -197,74 +253,118 @@ def scrape_with_proxy(url):
     return extract_text_from_html(response.text)
 
 
-def scrape(url, force_proxy=False):
-    """Main scraping function with fallback chain"""
+def scrape_with_browserless(url):
+    """Scrape using Browserless.io (renders JavaScript)"""
+    if not BROWSERLESS_API_KEY:
+        raise ValueError("Browserless API key not configured")
+    
+    response = requests.post(
+        f"https://chrome.browserless.io/content?token={BROWSERLESS_API_KEY}",
+        json={
+            "url": url,
+            "waitFor": 3000,  # Wait 3 seconds for JS to load
+        },
+        timeout=60
+    )
+    response.raise_for_status()
+    
+    return extract_text_from_html(response.text)
+
+
+def scrape(url, force_browserless=False):
+    """Main scraping function with intelligent routing"""
     if not url.startswith(('http://', 'https://')):
         url = 'https://' + url
     
     domain = get_domain(url)
-    use_brightdata = needs_brightdata(url) or force_proxy
+    requires_js = needs_js_render(url)
+    requires_unlocker = needs_unlocker(url)
     
     api_configured = bool(BRIGHTDATA_API_KEY and BRIGHTDATA_ZONE)
     proxy_configured = bool(BRIGHTDATA_USERNAME and BRIGHTDATA_PASSWORD)
+    browserless_configured = bool(BROWSERLESS_API_KEY)
     
     errors = []
     
-    # Route 1: Sites that need Bright Data
-    if use_brightdata:
-        # Try API method first (was working for swooped.co)
+    # Route 1: JS-required sites → Need Browserless
+    if requires_js or force_browserless:
+        if browserless_configured:
+            try:
+                text = scrape_with_browserless(url)
+                if not is_garbage_text(text) and not is_shell_only(text):
+                    return text, "browserless"
+                errors.append("Browserless returned incomplete content")
+            except Exception as e:
+                errors.append(f"Browserless error: {str(e)}")
+        
+        if not browserless_configured:
+            raise ValueError(f"ERROR_JS_REQUIRED: Site {domain} requires JavaScript rendering. Configure BROWSERLESS_API_KEY or use a browser-based solution.")
+        
+        if errors:
+            raise ValueError(f"Could not scrape JS site {domain}: {'; '.join(errors)}")
+    
+    # Route 2: Anti-bot sites → Web Unlocker
+    if requires_unlocker:
         if api_configured:
             try:
                 text = scrape_with_api(url)
-                if not is_garbage_text(text):
+                if not is_garbage_text(text) and not is_shell_only(text):
                     return text, "api"
-                errors.append("API returned unreadable content")
+                errors.append("API returned incomplete content")
             except Exception as e:
                 errors.append(f"API error: {str(e)}")
         
-        # Try proxy method as fallback
         if proxy_configured:
             try:
                 text = scrape_with_proxy(url)
-                if not is_garbage_text(text):
+                if not is_garbage_text(text) and not is_shell_only(text):
                     return text, "proxy"
-                errors.append("Proxy returned unreadable content")
+                errors.append("Proxy returned incomplete content")
             except Exception as e:
                 errors.append(f"Proxy error: {str(e)}")
         
         if errors:
             raise ValueError(f"Could not scrape {domain}: {'; '.join(errors)}")
         else:
-            raise ValueError(f"No Bright Data credentials configured for {domain}")
+            raise ValueError(f"No credentials configured for anti-bot site {domain}")
     
-    # Route 2: Normal sites - try direct first
+    # Route 3: Normal sites → Direct first
     try:
         text = scrape_direct(url)
-        if not is_garbage_text(text) and len(text) >= 100:
+        if not is_garbage_text(text) and not is_shell_only(text) and len(text) >= 100:
             return text, "direct"
-        errors.append("Direct returned unreadable content")
+        errors.append("Direct returned incomplete content")
     except Exception as e:
         errors.append(f"Direct error: {str(e)}")
     
-    # Route 3: Direct failed - try API
+    # Route 4: Direct failed → Try Web Unlocker API
     if api_configured:
         try:
             text = scrape_with_api(url)
-            if not is_garbage_text(text):
+            if not is_garbage_text(text) and not is_shell_only(text):
                 return text, "api"
-            errors.append("API returned unreadable content")
+            errors.append("API returned incomplete content")
         except Exception as e:
             errors.append(f"API error: {str(e)}")
     
-    # Route 4: API failed - try proxy
+    # Route 5: Try proxy
     if proxy_configured:
         try:
             text = scrape_with_proxy(url)
-            if not is_garbage_text(text):
+            if not is_garbage_text(text) and not is_shell_only(text):
                 return text, "proxy"
-            errors.append("Proxy returned unreadable content")
+            errors.append("Proxy returned incomplete content")
         except Exception as e:
             errors.append(f"Proxy error: {str(e)}")
+    
+    # Route 6: Last resort → Browserless
+    if browserless_configured:
+        try:
+            text = scrape_with_browserless(url)
+            if not is_garbage_text(text) and not is_shell_only(text):
+                return text, "browserless"
+        except Exception as e:
+            errors.append(f"Browserless error: {str(e)}")
     
     raise ValueError(f"Could not scrape {domain}: {'; '.join(errors)}")
 
@@ -273,11 +373,11 @@ def scrape(url, force_proxy=False):
 def home():
     return jsonify({
         "status": "running",
-        "version": "3.7-dual-method",
+        "version": "4.0-with-browserless",
         "api_configured": bool(BRIGHTDATA_API_KEY and BRIGHTDATA_ZONE),
         "proxy_configured": bool(BRIGHTDATA_USERNAME and BRIGHTDATA_PASSWORD),
-        "zone": BRIGHTDATA_ZONE or "not set",
-        "proxy_port": BRIGHTDATA_PORT
+        "browserless_configured": bool(BROWSERLESS_API_KEY),
+        "js_required_domains": len(JS_REQUIRED_DOMAINS)
     })
 
 
@@ -287,12 +387,12 @@ def handle():
     try:
         data = request.get_json() or {}
         url = data.get("website") or data.get("url")
-        force_proxy = data.get("force_proxy", False)
+        force_browserless = data.get("force_browserless", False)
         
         if not url:
             return jsonify({"success": False, "error": "website parameter required"}), 400
         
-        text, method = scrape(url, force_proxy=force_proxy)
+        text, method = scrape(url, force_browserless=force_browserless)
         
         if len(text) < 100:
             return jsonify({
@@ -311,10 +411,16 @@ def handle():
         })
     
     except ValueError as e:
+        error_msg = str(e)
+        error_code = "ERROR_SCRAPING_FAILED"
+        
+        if "ERROR_JS_REQUIRED" in error_msg:
+            error_code = "ERROR_JS_REQUIRED"
+        
         return jsonify({
             "success": False,
-            "error": "ERROR_SCRAPING_FAILED",
-            "message": str(e),
+            "error": error_code,
+            "message": error_msg,
             "url": data.get("website") or data.get("url")
         }), 422
     
