@@ -7,8 +7,9 @@ from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 
-# Bright Data API key (set in Cloud Run environment variables)
+# Bright Data credentials (set in Cloud Run environment variables)
 BRIGHTDATA_API_KEY = os.environ.get('BRIGHTDATA_API_KEY', '')
+BRIGHTDATA_ZONE = os.environ.get('BRIGHTDATA_ZONE', '')  # e.g., "unlocker" or "web_unlocker1"
 
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -68,7 +69,7 @@ def extract_text_from_html(html):
 
 
 def scrape_direct(url):
-    """Direct scraping without JavaScript rendering"""
+    """Direct scraping without proxy"""
     headers = {
         'User-Agent': random.choice(USER_AGENTS),
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -84,9 +85,11 @@ def scrape_direct(url):
 
 
 def scrape_with_brightdata(url):
-    """Scrape using Bright Data Web Scraper API"""
+    """Scrape using Bright Data Unlocker API"""
     if not BRIGHTDATA_API_KEY:
         raise ValueError("BRIGHTDATA_API_KEY not configured")
+    if not BRIGHTDATA_ZONE:
+        raise ValueError("BRIGHTDATA_ZONE not configured")
     
     api_url = "https://api.brightdata.com/request"
     
@@ -95,15 +98,16 @@ def scrape_with_brightdata(url):
         'Content-Type': 'application/json'
     }
     
+    # Include zone in the request body
     payload = {
+        'zone': BRIGHTDATA_ZONE,
         'url': url,
-        'format': 'raw'  # Get raw HTML
+        'format': 'raw'
     }
     
     response = requests.post(api_url, headers=headers, json=payload, timeout=60)
     response.raise_for_status()
     
-    # Bright Data returns the HTML content
     return extract_text_from_html(response.text)
 
 
@@ -120,27 +124,29 @@ def scrape(url, force_js=False):
         except:
             pass
     
-    # Fall back to Bright Data for JS rendering
-    if BRIGHTDATA_API_KEY:
+    # Fall back to Bright Data
+    if BRIGHTDATA_API_KEY and BRIGHTDATA_ZONE:
         text = scrape_with_brightdata(url)
         if not is_garbage_text(text):
             return text, "brightdata"
         raise ValueError("Bright Data returned unreadable content")
     else:
-        raise ValueError("Site requires JavaScript - configure BRIGHTDATA_API_KEY")
+        raise ValueError("Site requires JavaScript - configure BRIGHTDATA_API_KEY and BRIGHTDATA_ZONE")
 
 
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
         "status": "running",
-        "version": "3.0-brightdata",
-        "brightdata_configured": bool(BRIGHTDATA_API_KEY)
+        "version": "3.1-brightdata",
+        "brightdata_configured": bool(BRIGHTDATA_API_KEY and BRIGHTDATA_ZONE),
+        "zone": BRIGHTDATA_ZONE or "not set"
     })
 
 
 @app.route("/", methods=["POST"])
 def handle():
+    data = {}
     try:
         data = request.get_json() or {}
         url = data.get("website") or data.get("url")
@@ -176,9 +182,15 @@ def handle():
     
     except requests.exceptions.HTTPError as e:
         status = e.response.status_code if e.response is not None else 0
+        error_body = ""
+        try:
+            error_body = e.response.text[:500] if e.response else ""
+        except:
+            pass
         return jsonify({
             "success": False,
             "error": f"ERROR_HTTP_{status}",
+            "details": error_body,
             "url": data.get("website") or data.get("url")
         }), 422
     
