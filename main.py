@@ -69,6 +69,7 @@ PROTECTED_DOMAINS = [
     'builtin.com',
     'dice.com',
     'careerbuilder.com',
+    'betterteam.com',  # Has security verification
 ]
 
 
@@ -101,6 +102,7 @@ def is_blocked(text):
     lower_text = text.lower()
     
     block_indicators = [
+        # Cloudflare
         'you have been blocked',
         'cloudflare ray id',
         'please enable cookies',
@@ -111,9 +113,12 @@ def is_blocked(text):
         'please wait while we verify',
         'just a moment...',
         'enable javascript and cookies',
+        
+        # Generic security
         'access denied',
         'access to this page has been denied',
         'please verify you are human',
+        'verify you are human',
         'complete the captcha',
         'prove you are not a robot',
         'bot detection',
@@ -124,12 +129,50 @@ def is_blocked(text):
         'human verification',
         'ddos protection',
         'security check',
+        
+        # Security services
         'incapsula',
         'perimeterx',
         'datadome',
+        'kasada',
+        'shape security',
+        'distil networks',
+        'imperva',
+        
+        # BetterTeam / Other challenges
+        'review the security of your connection',
+        'needs to review the security',
+        'verification successful\nwaiting for',
+        'waiting for.*to respond',
+        'completing the action below',
+        'before proceeding',
+        
+        # PerimeterX/HUMAN
+        'press & hold',
+        'press and hold',
+        'hold to confirm',
+        
+        # Queue/waiting pages
+        'you are in line',
+        'waiting room',
+        'please wait...',
     ]
     
     matches = sum(1 for ind in block_indicators if ind in lower_text)
+    
+    # Strong indicators - single match is enough
+    strong_indicators = [
+        'verify you are human',
+        'cloudflare ray id',
+        'you have been blocked',
+        'captcha',
+        'review the security of your connection',
+        'completing the action below',
+    ]
+    
+    for strong in strong_indicators:
+        if strong in lower_text:
+            return True
     
     if matches >= 2:
         return True
@@ -266,6 +309,7 @@ def scrape_with_scraping_browser(url):
     """
     Bright Data Scraping Browser - BEST for Cloudflare
     Uses real Chrome browser with undetectable fingerprints
+    Includes CAPTCHA solving capability
     """
     if not SCRAPING_BROWSER_USERNAME or not SCRAPING_BROWSER_PASSWORD:
         raise ValueError("Scraping Browser not configured")
@@ -278,9 +322,11 @@ def scrape_with_scraping_browser(url):
         headers={
             'User-Agent': random.choice(USER_AGENTS),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            # Enable CAPTCHA auto-solving (requires enabling in Bright Data dashboard)
+            'x-browser-solve-captcha': 'true',
         },
         proxies={'http': proxy_url, 'https': proxy_url},
-        timeout=120,  # Scraping Browser is slower but more reliable
+        timeout=180,  # Longer timeout for CAPTCHA solving (can take 30-60 sec)
         verify=False
     )
     response.raise_for_status()
@@ -498,7 +544,7 @@ def scrape(url, force_browserless=False):
 def home():
     return jsonify({
         "status": "running",
-        "version": "5.0-scraping-browser",
+        "version": "5.2-captcha-solving",
         "methods": {
             "web_unlocker_api": bool(BRIGHTDATA_API_KEY and BRIGHTDATA_ZONE),
             "web_unlocker_proxy": bool(BRIGHTDATA_USERNAME and BRIGHTDATA_PASSWORD),
