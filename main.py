@@ -20,13 +20,10 @@ BRIGHTDATA_PORT = os.environ.get('BRIGHTDATA_PORT', '33335')
 # Method 3: Browserless.io - For JS-heavy sites
 BROWSERLESS_API_KEY = os.environ.get('BROWSERLESS_API_KEY', '')
 
-# Method 4: Bright Data Scraping Browser - For Cloudflare/heavy protection
-SCRAPING_BROWSER_USERNAME = os.environ.get('SCRAPING_BROWSER_USERNAME', '')
-SCRAPING_BROWSER_PASSWORD = os.environ.get('SCRAPING_BROWSER_PASSWORD', '')
-
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
 ]
 
 # Sites that REQUIRE JavaScript rendering
@@ -55,7 +52,7 @@ JS_REQUIRED_DOMAINS = [
     'workable.com',
 ]
 
-# Sites with anti-bot protection (use Web Unlocker or Scraping Browser)
+# Sites with anti-bot protection
 PROTECTED_DOMAINS = [
     'swooped.co',
     'linkedin.com',
@@ -69,7 +66,7 @@ PROTECTED_DOMAINS = [
     'builtin.com',
     'dice.com',
     'careerbuilder.com',
-    'betterteam.com',  # Has security verification
+    'betterteam.com',
 ]
 
 
@@ -101,65 +98,6 @@ def is_blocked(text):
     
     lower_text = text.lower()
     
-    block_indicators = [
-        # Cloudflare
-        'you have been blocked',
-        'cloudflare ray id',
-        'please enable cookies',
-        'security service to protect itself',
-        'why have i been blocked',
-        'attention required',
-        'checking your browser',
-        'please wait while we verify',
-        'just a moment...',
-        'enable javascript and cookies',
-        
-        # Generic security
-        'access denied',
-        'access to this page has been denied',
-        'please verify you are human',
-        'verify you are human',
-        'complete the captcha',
-        'prove you are not a robot',
-        'bot detection',
-        'suspicious activity',
-        'too many requests',
-        'rate limit exceeded',
-        'are you a robot',
-        'human verification',
-        'ddos protection',
-        'security check',
-        
-        # Security services
-        'incapsula',
-        'perimeterx',
-        'datadome',
-        'kasada',
-        'shape security',
-        'distil networks',
-        'imperva',
-        
-        # BetterTeam / Other challenges
-        'review the security of your connection',
-        'needs to review the security',
-        'verification successful\nwaiting for',
-        'waiting for.*to respond',
-        'completing the action below',
-        'before proceeding',
-        
-        # PerimeterX/HUMAN
-        'press & hold',
-        'press and hold',
-        'hold to confirm',
-        
-        # Queue/waiting pages
-        'you are in line',
-        'waiting room',
-        'please wait...',
-    ]
-    
-    matches = sum(1 for ind in block_indicators if ind in lower_text)
-    
     # Strong indicators - single match is enough
     strong_indicators = [
         'verify you are human',
@@ -168,15 +106,45 @@ def is_blocked(text):
         'captcha',
         'review the security of your connection',
         'completing the action below',
+        'access denied',
+        'please enable cookies',
     ]
     
     for strong in strong_indicators:
         if strong in lower_text:
             return True
     
+    # Weaker indicators - need multiple matches
+    block_indicators = [
+        'security service to protect itself',
+        'why have i been blocked',
+        'attention required',
+        'checking your browser',
+        'please wait while we verify',
+        'just a moment',
+        'enable javascript and cookies',
+        'please verify you are human',
+        'complete the captcha',
+        'prove you are not a robot',
+        'bot detection',
+        'suspicious activity',
+        'too many requests',
+        'rate limit',
+        'human verification',
+        'ddos protection',
+        'security check',
+        'incapsula',
+        'perimeterx',
+        'datadome',
+        'waiting for',
+        'before proceeding',
+    ]
+    
+    matches = sum(1 for ind in block_indicators if ind in lower_text)
+    
     if matches >= 2:
         return True
-    if matches >= 1 and len(text) < 2000:
+    if matches >= 1 and len(text) < 1500:
         return True
     
     return False
@@ -186,8 +154,7 @@ def is_garbage_text(text):
     if not text or len(text) < 50:
         return True
     
-    control_chars = sum(1 for c in text if ord(c) < 32 and c not in '\n\r\t')
-    if text.count('\x00') > 0 or (len(text) > 0 and control_chars / len(text) > 0.05):
+    if text.count('\x00') > 0:
         return True
     
     words = re.findall(r'[a-zA-Z]{3,}', text)
@@ -203,8 +170,8 @@ def is_shell_only(text):
     
     lower_text = text.lower()
     
-    shell_indicators = ['toggle navigation', 'candidate dashboard', 'join today', 'privacy policy', 'cookie policy']
-    content_indicators = ['responsibilities', 'requirements', 'qualifications', 'what you\'ll do', 'about the role']
+    shell_indicators = ['toggle navigation', 'candidate dashboard', 'join today', 'privacy policy', 'cookie policy', 'sign in', 'create account']
+    content_indicators = ['responsibilities', 'requirements', 'qualifications', 'what you\'ll do', 'about the role', 'experience', 'skills']
     
     shell_count = sum(1 for ind in shell_indicators if ind in lower_text)
     content_count = sum(1 for ind in content_indicators if ind in lower_text)
@@ -259,6 +226,8 @@ def scrape_direct(url):
         'User-Agent': random.choice(USER_AGENTS),
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
     }
     response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
     response.raise_for_status()
@@ -294,7 +263,10 @@ def scrape_with_web_unlocker_proxy(url):
     
     response = requests.get(
         url,
-        headers={'User-Agent': random.choice(USER_AGENTS)},
+        headers={
+            'User-Agent': random.choice(USER_AGENTS),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
         proxies={'http': proxy_url, 'https': proxy_url},
         timeout=90,
         verify=False
@@ -305,38 +277,8 @@ def scrape_with_web_unlocker_proxy(url):
     return extract_text_from_html(response.text)
 
 
-def scrape_with_scraping_browser(url):
-    """
-    Bright Data Scraping Browser - BEST for Cloudflare
-    Uses real Chrome browser with undetectable fingerprints
-    Includes CAPTCHA solving capability
-    """
-    if not SCRAPING_BROWSER_USERNAME or not SCRAPING_BROWSER_PASSWORD:
-        raise ValueError("Scraping Browser not configured")
-    
-    # Scraping Browser uses port 22225
-    proxy_url = f"http://{SCRAPING_BROWSER_USERNAME}:{SCRAPING_BROWSER_PASSWORD}@brd.superproxy.io:22225"
-    
-    response = requests.get(
-        url,
-        headers={
-            'User-Agent': random.choice(USER_AGENTS),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            # Enable CAPTCHA auto-solving (requires enabling in Bright Data dashboard)
-            'x-browser-solve-captcha': 'true',
-        },
-        proxies={'http': proxy_url, 'https': proxy_url},
-        timeout=180,  # Longer timeout for CAPTCHA solving (can take 30-60 sec)
-        verify=False
-    )
-    response.raise_for_status()
-    if response.encoding is None or response.encoding == 'ISO-8859-1':
-        response.encoding = response.apparent_encoding or 'utf-8'
-    return extract_text_from_html(response.text)
-
-
 def scrape_with_browserless(url, stealth=False):
-    """Browserless.io - JS rendering"""
+    """Browserless.io - JS rendering with optional stealth mode"""
     if not BROWSERLESS_API_KEY:
         raise ValueError("Browserless not configured")
     
@@ -377,63 +319,52 @@ def scrape(url, force_browserless=False):
     # Check what's configured
     web_unlocker_api = bool(BRIGHTDATA_API_KEY and BRIGHTDATA_ZONE)
     web_unlocker_proxy = bool(BRIGHTDATA_USERNAME and BRIGHTDATA_PASSWORD)
-    scraping_browser = bool(SCRAPING_BROWSER_USERNAME and SCRAPING_BROWSER_PASSWORD)
     browserless = bool(BROWSERLESS_API_KEY)
     
     errors = []
     
     # ============================================
     # ROUTE 1: JS-REQUIRED SITES
-    # Try: Browserless → Scraping Browser
+    # Try: Browserless (stealth) → Browserless (normal)
     # ============================================
     if js_required or force_browserless:
-        # Try Browserless with stealth first
-        if browserless:
-            try:
-                text = scrape_with_browserless(url, stealth=True)
-                is_valid, err_type, err_msg = validate_content(text)
-                if is_valid:
-                    return text, "browserless_stealth", None, None
-                if err_type == "blocked":
-                    errors.append(f"Browserless stealth: blocked")
-                else:
-                    errors.append(f"Browserless stealth: {err_msg}")
-            except Exception as e:
-                errors.append(f"Browserless stealth: {str(e)}")
+        if not browserless:
+            return None, None, "ERROR_JS_REQUIRED", f"Site requires JS rendering. Configure BROWSERLESS_API_KEY."
         
-        # Try Scraping Browser (better Cloudflare bypass)
-        if scraping_browser:
-            try:
-                text = scrape_with_scraping_browser(url)
-                is_valid, err_type, err_msg = validate_content(text)
-                if is_valid:
-                    return text, "scraping_browser", None, None
-                errors.append(f"Scraping Browser: {err_msg}")
-            except Exception as e:
-                errors.append(f"Scraping Browser: {str(e)}")
+        # Try Browserless with stealth
+        try:
+            text = scrape_with_browserless(url, stealth=True)
+            is_valid, err_type, err_msg = validate_content(text)
+            if is_valid:
+                return text, "browserless_stealth", None, None
+            if err_type == "blocked":
+                errors.append("Browserless stealth: blocked")
+            else:
+                errors.append(f"Browserless stealth: {err_msg}")
+        except Exception as e:
+            errors.append(f"Browserless stealth: {str(e)}")
         
-        if not browserless and not scraping_browser:
-            return None, None, "ERROR_JS_REQUIRED", f"Site requires JS. Configure BROWSERLESS_API_KEY or SCRAPING_BROWSER credentials."
+        # Try normal Browserless
+        try:
+            text = scrape_with_browserless(url, stealth=False)
+            is_valid, err_type, err_msg = validate_content(text)
+            if is_valid:
+                return text, "browserless", None, None
+            errors.append(f"Browserless: {err_msg}")
+        except Exception as e:
+            errors.append(f"Browserless: {str(e)}")
         
+        # JS site and all browserless attempts failed
+        if any("block" in e.lower() for e in errors):
+            return None, None, "ERROR_BLOCKED", f"Blocked by {domain}: {'; '.join(errors)}"
         return None, None, "ERROR_SCRAPING_FAILED", f"JS site {domain}: {'; '.join(errors)}"
     
     # ============================================
     # ROUTE 2: PROTECTED SITES (Cloudflare etc)
-    # Try: Scraping Browser → Web Unlocker → Browserless
+    # Try: Web Unlocker API → Web Unlocker Proxy → Browserless stealth
     # ============================================
     if is_protected:
-        # Scraping Browser is BEST for protected sites
-        if scraping_browser:
-            try:
-                text = scrape_with_scraping_browser(url)
-                is_valid, err_type, err_msg = validate_content(text)
-                if is_valid:
-                    return text, "scraping_browser", None, None
-                errors.append(f"Scraping Browser: {err_msg}")
-            except Exception as e:
-                errors.append(f"Scraping Browser: {str(e)}")
-        
-        # Try Web Unlocker API
+        # Try Web Unlocker API first (best for anti-bot)
         if web_unlocker_api:
             try:
                 text = scrape_with_web_unlocker_api(url)
@@ -455,7 +386,7 @@ def scrape(url, force_browserless=False):
             except Exception as e:
                 errors.append(f"Web Unlocker Proxy: {str(e)}")
         
-        # Try Browserless with stealth
+        # Try Browserless with stealth as last resort
         if browserless:
             try:
                 text = scrape_with_browserless(url, stealth=True)
@@ -466,9 +397,9 @@ def scrape(url, force_browserless=False):
             except Exception as e:
                 errors.append(f"Browserless stealth: {str(e)}")
         
-        # All failed
+        # All methods failed for protected site
         if any("block" in e.lower() for e in errors):
-            return None, None, "ERROR_BLOCKED", f"All methods blocked by {domain}"
+            return None, None, "ERROR_BLOCKED", f"All methods blocked by {domain}: {'; '.join(errors)}"
         return None, None, "ERROR_SCRAPING_FAILED", f"Protected site {domain}: {'; '.join(errors)}"
     
     # ============================================
@@ -483,7 +414,7 @@ def scrape(url, force_browserless=False):
         if is_valid:
             return text, "direct", None, None
         if err_type == "blocked":
-            errors.append(f"Direct: blocked")
+            errors.append("Direct: blocked")
         else:
             errors.append(f"Direct: {err_msg}")
     except Exception as e:
@@ -511,17 +442,6 @@ def scrape(url, force_browserless=False):
         except Exception as e:
             errors.append(f"Web Unlocker Proxy: {str(e)}")
     
-    # Try Scraping Browser
-    if scraping_browser:
-        try:
-            text = scrape_with_scraping_browser(url)
-            is_valid, err_type, err_msg = validate_content(text)
-            if is_valid:
-                return text, "scraping_browser", None, None
-            errors.append(f"Scraping Browser: {err_msg}")
-        except Exception as e:
-            errors.append(f"Scraping Browser: {str(e)}")
-    
     # Try Browserless
     if browserless:
         try:
@@ -544,13 +464,13 @@ def scrape(url, force_browserless=False):
 def home():
     return jsonify({
         "status": "running",
-        "version": "5.2-captcha-solving",
+        "version": "6.0-cleaned",
         "methods": {
             "web_unlocker_api": bool(BRIGHTDATA_API_KEY and BRIGHTDATA_ZONE),
             "web_unlocker_proxy": bool(BRIGHTDATA_USERNAME and BRIGHTDATA_PASSWORD),
-            "scraping_browser": bool(SCRAPING_BROWSER_USERNAME and SCRAPING_BROWSER_PASSWORD),
             "browserless": bool(BROWSERLESS_API_KEY),
-        }
+        },
+        "note": "Scraping Browser removed - requires Puppeteer/Playwright, not HTTP requests"
     })
 
 
